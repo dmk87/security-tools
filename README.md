@@ -7,7 +7,7 @@
 Одна команда — и готово:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/dmk87/security-tools/main/mptcp-check.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/dmk87/security-tools/main/mptcp-check.sh | tr -d '\r' | sudo bash
 ```
 
 > **Требуется root:** без `sudo` скрипт выполнит проверку, но не сможет применить защиту (запись в `/etc/sysctl.d/` и `sysctl -w`).
