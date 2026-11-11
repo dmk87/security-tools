@@ -20,7 +20,7 @@
 Одна команда — и готово:
 
 ```bash
-curl -sSL https://githubusercontent.com | tr -d '\r' | sudo bash
+curl -sSL https://raw.githubusercontent.com/dmk87/security-tools/main/php-fastpanel-check.sh | tr -d '\r' | sudo bash
 ```
 
 > **Требуется root:** без `sudo` скрипт не сможет прочитать параметры запущенных процессов других пользователей и проверить системные пакеты.
