@@ -28,7 +28,7 @@ curl -sSL https://raw.githubusercontent.com/dmk87/security-tools/main/php-fastpa
 Классический вариант — скачать, посмотреть, запустить:
 
 ```bash
-curl -O [https://githubusercontent.com](https://raw.githubusercontent.com/dmk87/security-tools/main/php-fastpanel-check.sh)
+curl -O https://raw.githubusercontent.com/dmk87/security-tools/main/php-fastpanel-check.sh
 less php-fastpanel-check.sh          # убедитесь, что перед вами тот самый код
 chmod +x php-fastpanel-check.sh
 sudo ./php-fastpanel-check.sh
