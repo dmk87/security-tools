@@ -103,7 +103,9 @@ if [ -z "$POOL_UP" ] && [ -z "$INI_UP" ]; then
 fi
 
 echo -e "\n--- Смена session.serialize_handler в коде и конфигах ---"
-CODE_MATCHES=$(grep -rnw '/var/www/' -e 'session.serialize_handler' --exclude-dir={Tests,tests,Test,test} 2>/dev/null | head -n 20)
+# Ищем только в исходниках PHP — так в выборку не попадают access.log и прочий мусор,
+# где URL запрошенных файлов содержит ту же подстроку.
+CODE_MATCHES=$(grep -rnw '/var/www/' -e 'session.serialize_handler' --include='*.php' --include='*.inc' --include='*.phtml' --exclude-dir={Tests,tests,Test,test} 2>/dev/null | head -n 20)
 POOL_SER=$(grep -rnsE 'php_(admin_)?(value|flag)[[:space:]]*(\[[^]]*\])?[[:space:]]*session\.serialize_handler[[:space:]]*=' \
     /etc/php/*/fpm/pool.d/ /opt/*/etc/php-fpm.d/ /opt/fphp/etc/ 2>/dev/null | grep -E '\.conf:')
 INI_SER=$(grep -rnsE '^\s*session\.serialize_handler[[:space:]]*=' /var/www/ 2>/dev/null | grep -E '\.user\.ini:')
