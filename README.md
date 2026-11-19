@@ -171,13 +171,24 @@ chmod +x php-upload-progress-check.sh
 
 Если вердикт не `[ОК]`, выключите вектор у **каждого** бинарника php-fpm (скрипт сам найдёт конфиг — работает и для FASTPANEL `/opt/fphp`, и для системных версий):
 
+### 🧰 Быстрое исправление
+
+Если вердикт не `[ОК]`, выключите вектор у **каждого** бинарника php-fpm (скрипт сам найдёт конфиг, допишет параметр при его отсутствии и мягко перезагрузит только запущенные службы — работает и для FASTPANEL `/opt/fphp`, и для системных версий):
+
 ```bash
-for BIN in $(find /usr/sbin /opt -maxdepth 3 -name 'php-fpm*' -type f -executable 2>/dev/null); do
-  INI=$($BIN -i 2>/dev/null | awk -F' => ' '/^Loaded Configuration File/{print $2}')
-  [ -n "$INI" ] && sudo sed -i 's/^;\?[[:space:]]*session\.upload_progress\.enabled.*/session.upload_progress.enabled = Off/' "$INI"
+for BIN in \$(find /usr/sbin /opt -maxdepth 3 -name 'php-fpm*' -type f -executable 2>/dev/null); do
+  INI=(BIN -i 2>/dev/null | awk -F' => ' '/^Loaded Configuration File/{print \$2}')
+  if [ -f "\$INI" ]; then
+    grep -qE '^;?[[:space:]]*session\.upload_progress\.enabled' "\$INI" \
+      && sudo sed -i -E 's/^;?[[:space:]]*session\.upload_progress\.enabled.*/session.upload_progress.enabled = Off/' "\$INI" \
+      || echo "session.upload_progress.enabled = Off" | sudo tee -a "\$INI" >/dev/null
+  fi
 done
-systemctl list-units --type=service --all | grep -Ei "fphp|php.*fpm" | awk '{print $1}' | xargs -r sudo systemctl restart
+systemctl list-units --type=service --state=running --no-legend | awk '/fphp|php.*fpm/{print \$1}' | xargs -r sudo systemctl reload
 ```
+
+Перезагрузка конфигурации (`reload`) нужна, чтобы новые настройки попали в работающие процессы без обрыва текущих соединений (если служба была остановлена, изменения применятся при её следующем запуске).
+
 
 Перезапуск нужен, чтобы новые настройки попали в работающие процессы — именно на это смотрит `php-fastpanel-check.sh` из раздела 1.
 
