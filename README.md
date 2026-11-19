@@ -141,7 +141,7 @@ echo "net.mptcp.enabled = 0" >> /etc/sysctl.d/99-disable-mptcp.conf   # пере
 curl -sSL https://raw.githubusercontent.com/dmk87/security-tools/main/php-upload-progress-check.sh | tr -d '\r' | bash
 ```
 
-> **sudo не обязателен:** скрипт только читает конфигурацию и не меняет ничего на сервере. Код выхода: `0` — защищено, `1` — требуется внимание, `2` — PHP не найден. Удобно для cron и алертов: `bash <(curl -sSL ...)` сохраняет код выхода, в отличие от пайпа в `bash`.
+> **sudo не обязателен:** скрипт только читает конфигурацию и ничего не меняет на сервере. Коды выхода: `0` — защищено, `1` — предупреждение, `2` — критический риск, `3` — PHP не найден. Удобно для cron и алертов: `bash <(curl -sSL ...)` сохраняет код выхода, в отличие от пайпа в `bash`.
 
 Классический вариант — скачать, посмотреть, запустить:
 
@@ -157,23 +157,29 @@ chmod +x php-upload-progress-check.sh
 1. **Собирает все бинарники php-fpm** — системные из `/usr/sbin`, `/usr/local/sbin` и сборки FASTPANEL из `/opt`.
 2. **Читает настройки каждой версии** — `session.upload_progress.enabled` и `session.serialize_handler` через phpinfo.
 3. **Разбирает переопределения в пулах FPM и `.user.ini`** — они не видны через `php -i`, поэтому без этого шага вердикт может быть ложным «защищено».
-4. **Ищет смену `serialize_handler` в коде сайтов** (`/var/www`) — при включённом `upload_progress` рассинхрон записи/чтения сессии открывает путь к десериализации.
+4. **Сверяет `serialize_handler` между всеми контекстами** (бинарники, пулы, `.user.ini`, код сайтов) — разные значения или смена handler'а в коде — усиливающее условие: именно рассинхрон записи/чтения открывает путь к десериализации.
 
 ### 🚦 Возможные вердикты
 
 | Вердикт | Что это значит | Что делать |
 |---|---|---|
 | `[ОК]` | `upload_progress` отключён во всех контекстах | Ничего — вектор заблокирован |
-| `[ВНИМАНИЕ]` | `upload_progress` включён хотя бы в одном контексте | Отключить в `php.ini` всех версий, во всех пулах FPM и в `.user.ini`; serializer должен быть одинаков на записи и на чтении |
+| `[ПРЕДУПРЕЖДЕНИЕ]` | `upload_progress` включён хотя бы в одном контексте, рассинхрона handler'ов не найдено | Отключить в `php.ini` всех версий, во всех пулах FPM и в `.user.ini` |
+| `[КРИТИЧНО]` | `upload_progress` включён **и** найден рассинхрон `serialize_handler` (запись ≠ чтение или смена handler'а в коде) | Оба исправления из строки выше — вектор готов к десериализации |
 
 ### 🧰 Быстрое исправление
 
-Если вердикт `[ВНИМАНИЕ]`, выключите вектор в php.ini всех установленных версий (системных и FASTPANEL) и перезапустите службы FPM:
+Если вердикт не `[ОК]`, выключите вектор у **каждого** бинарника php-fpm (скрипт сам найдёт конфиг — работает и для FASTPANEL `/opt/fphp`, и для системных версий):
 
 ```bash
-sudo sed -i 's/^session.upload_progress.enabled.*/session.upload_progress.enabled = Off/' /etc/php/*/fpm/php.ini /opt/php*/etc/php.ini
-systemctl list-units --type=service --all | grep -E "php.*fpm" | awk '{print $1}' | xargs -r sudo systemctl restart
+for BIN in $(find /usr/sbin /opt -maxdepth 3 -name 'php-fpm*' -type f -executable 2>/dev/null); do
+  INI=$($BIN -i 2>/dev/null | awk -F': ' '/^Loaded Configuration File/{print $2}')
+  [ -n "$INI" ] && sudo sed -i 's/^;\?[[:space:]]*session\.upload_progress\.enabled.*/session.upload_progress.enabled = Off/' "$INI"
+done
+systemctl list-units --type=service --all | grep -Ei "fphp|php.*fpm" | awk '{print $1}' | xargs -r sudo systemctl restart
 ```
+
+Перезапуск нужен, чтобы новые настройки попали в работающие процессы — именно на это смотрит `php-fastpanel-check.sh` из раздела 1.
 
 ---
 
