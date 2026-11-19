@@ -8,6 +8,7 @@
 
 1. [php-fastpanel-check.sh — аудит PHP, FASTPANEL и обновлений ОС (защита от PHP2Shell)](#1--php-fastpanel-checksh--аудит-php-fastpanel-и-обновлений-ос)
 2. [mptcp-check.sh — проверка и защита сервера от уязвимости MPTCP](#2-%EF%B8%8F-mptcp-checksh--проверка-и-защита-сервера-от-уязвимости-mptcp)
+3. [php-upload-progress-check.sh — аудит php-fpm на вектор session.upload_progress](#3--php-upload-progress-checksh--аудит-php-fpm-на-вектор-sessionupload_progress)
 
 ---
 
@@ -127,13 +128,60 @@ echo "net.mptcp.enabled = 0" >> /etc/sysctl.d/99-disable-mptcp.conf   # пере
 
 Отключение MPTCP не влияет на обычную работу сети: протокол используется лишь для агрегации нескольких путей соединения. Если он вам не нужен — вы ничего не заметите.
 
+
+## 3. 🛡️ `php-upload-progress-check.sh` — аудит php-fpm на вектор session.upload_progress
+
+Диагностический скрипт в режиме **только для чтения** (ничего не меняет). Проверяет все бинарники `php-fpm` (системные и из `/opt` для **FASTPANEL**) на включённый `session.upload_progress`, ищет переопределения в пулах FPM и `.user.ini`, а также смену `session.serialize_handler` в коде сайтов. Уязвимая комбинация позволяет через multipart-запрос подменить содержимое сессии и добиться десериализации контролируемых данных.
+
+### ⚡ Быстрый старт
+
+Одна команда — и готово:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/dmk87/security-tools/main/php-upload-progress-check.sh | tr -d '\r' | bash
+```
+
+> **sudo не обязателен:** скрипт только читает конфигурацию и не меняет ничего на сервере. Код выхода: `0` — защищено, `1` — требуется внимание, `2` — PHP не найден. Удобно для cron и алертов: `bash <(curl -sSL ...)` сохраняет код выхода, в отличие от пайпа в `bash`.
+
+Классический вариант — скачать, посмотреть, запустить:
+
+```bash
+curl -O https://raw.githubusercontent.com/dmk87/security-tools/main/php-upload-progress-check.sh
+less php-upload-progress-check.sh    # убедитесь, что перед вами тот самый код
+chmod +x php-upload-progress-check.sh
+./php-upload-progress-check.sh
+```
+
+### 🔍 Что делает скрипт
+
+1. **Собирает все бинарники php-fpm** — системные из `/usr/sbin`, `/usr/local/sbin` и сборки FASTPANEL из `/opt`.
+2. **Читает настройки каждой версии** — `session.upload_progress.enabled` и `session.serialize_handler` через phpinfo.
+3. **Разбирает переопределения в пулах FPM и `.user.ini`** — они не видны через `php -i`, поэтому без этого шага вердикт может быть ложным «защищено».
+4. **Ищет смену `serialize_handler` в коде сайтов** (`/var/www`) — при включённом `upload_progress` рассинхрон записи/чтения сессии открывает путь к десериализации.
+
+### 🚦 Возможные вердикты
+
+| Вердикт | Что это значит | Что делать |
+|---|---|---|
+| `[ОК]` | `upload_progress` отключён во всех контекстах | Ничего — вектор заблокирован |
+| `[ВНИМАНИЕ]` | `upload_progress` включён хотя бы в одном контексте | Отключить в `php.ini` всех версий, во всех пулах FPM и в `.user.ini`; serializer должен быть одинаков на записи и на чтении |
+
+### 🧰 Быстрое исправление
+
+Если вердикт `[ВНИМАНИЕ]`, выключите вектор в php.ini всех установленных версий (системных и FASTPANEL) и перезапустите службы FPM:
+
+```bash
+sudo sed -i 's/^session.upload_progress.enabled.*/session.upload_progress.enabled = Off/' /etc/php/*/fpm/php.ini /opt/php*/etc/php.ini
+systemctl list-units --type=service --all | grep -E "php.*fpm" | awk '{print $1}' | xargs -r sudo systemctl restart
+```
+
 ---
 
 ## ⚠️ Важные замечания
 
 - **Временная защита для MPTCP — не замена патчу.** Обновите ядро (`apt update && apt upgrade` / `dnf update`) и перезагрузитесь, чтобы вернуться к постоянному решению.
 - Скрипт `php-fastpanel-check.sh` работает строго в режиме чтения и **не** вносит изменений в конфигурацию без вашего участия.
-- Перед запуском любого стороннего кода загляните в него глазами — исходники обоих скриптов открыты.
+- Перед запуском любого стороннего кода загляните в него глазами — исходники всех скриптов открыты.
 
 ## 📄 Лицензия
 
