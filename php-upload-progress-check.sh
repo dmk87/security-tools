@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 #
 # Аудит php-fpm на вектор "session.upload_progress -> подмена сессии -> десериализация".
-# Закрытие вектора: session.upload_progress.enabled = Off и единый session.serialize_handler
-# во всех версиях PHP и во всех пулах.
 #
-# Коды выхода: 0 — защищено; 1 — требуется внимание; 2 — php-fpm не найден.
+# Условие 1 (обязательное): session.upload_progress.enabled = On —
+#   через multipart-запрос атакующий может записать в сессию произвольные ключи.
+# Условие 2 (усиливающее): рассинхрон session.serialize_handler между контекстами
+#   (бинарники, пулы, .user.ini, код сайтов) — открывает путь к десериализации.
+#   Важно: handler "php_serialize" сам по себе НЕ уязвим; опасно именно расхождение
+#   записи и чтения (например, запись php_serialize + чтение php).
+#
+# Коды выхода: 0 — защищено; 1 — предупреждение; 2 — критический риск; 3 — PHP не найден.
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -23,24 +28,24 @@ echo "Хост: $(hostname) | IP: $(hostname -I 2>/dev/null | awk '{print $1}')"
 echo "Дата проверки: $(date '+%Y-%m-%d %H:%M:%S')"
 echo "=================================================="
 
-# Собираем все бинарники php-fpm: системные и из /opt (FASTPANEL)
+# Бинарники php-fpm: системные и из /opt (FASTPANEL: /opt/fphp, /opt/phpNN и т.п.)
 FPM_BINS=$(find /usr/sbin /usr/local/sbin /opt -maxdepth 3 -name 'php-fpm*' -type f -executable 2>/dev/null | sort -u)
-
 CLI_PHP=$(command -v php 2>/dev/null || true)
 
 if [ -z "$FPM_BINS" ] && [ -n "$CLI_PHP" ]; then
-    echo -e "${YELLOW}[INFO] Бинарники php-fpm не найдены. Проверяю CLI php (СПРАВОЧНО: у CLI и FPM разные php.ini, вердикт для FPM недостоверен).${NC}"
+    echo -e "${YELLOW}[INFO] Бинарники php-fpm не найдены. Проверяю CLI php (СПРАВОЧНО: у CLI и FPM разные php.ini).${NC}"
     FPM_BINS="$CLI_PHP"
 fi
 
 if [ -z "$FPM_BINS" ]; then
     echo -e "${YELLOW}[INFO] PHP на хосте не найден — проверять нечего.${NC}"
-    exit 2
+    exit 3
 fi
 
-VULN_CONFIG_FOUND=0
-UPLOAD_PROGRESS_ON=0
-SERIALIZER_OVERRIDE=0
+UPLOAD_ON=0        # Условие 1: upload_progress включён хотя бы где-то
+MISMATCH=0         # Условие 2: рассинхрон serialize_handler
+WARNING_UNREADABLE=0
+HANDLERS_SEEN=""
 
 for BIN in $FPM_BINS; do
     VER=$("$BIN" -v 2>/dev/null | head -n 1 | awk '{print $2}')
@@ -49,67 +54,111 @@ for BIN in $FPM_BINS; do
     SERIALIZER=$(printf '%s\n' "$INFO" | grep '^session.serialize_handler' | awk -F '=> ' '{print $2}' | xargs)
 
     echo -e "\nБинарник: ${YELLOW}$BIN${NC} (Версия: ${VER:-?})"
-    echo "  -> session.upload_progress.enabled = ${UPLOAD_PROG:-<не удалось прочитать>}"
-    echo "  -> session.serialize_handler       = ${SERIALIZER:-<не удалось прочитать>}"
 
     if [ -z "$UPLOAD_PROG" ]; then
-        echo -e "  ${YELLOW}[INFO] Не удалось получить настройки бинарника — проверьте вручную: $BIN -i | grep upload_progress${NC}"
+        echo -e "  ${YELLOW}[INFO] Не удалось прочитать настройки — проверьте вручную: $BIN -i | grep upload_progress${NC}"
+        WARNING_UNREADABLE=1
         continue
     fi
 
+    echo "  -> [Условие 1] session.upload_progress.enabled = $UPLOAD_PROG"
+    echo "  -> [Условие 2] session.serialize_handler       = ${SERIALIZER:-<неизвестно>}"
+
+    if [ -n "$SERIALIZER" ]; then
+        case " $HANDLERS_SEEN " in
+            *" $SERIALIZER "*) : ;;
+            *) HANDLERS_SEEN="$HANDLERS_SEEN $SERIALIZER" ;;
+        esac
+    fi
+
     if is_on "$UPLOAD_PROG"; then
-        echo -e "  ${RED}[ВНИМАНИЕ] upload_progress ВКЛЮЧЁН — вектор доступен.${NC}"
-        VULN_CONFIG_FOUND=1
-        UPLOAD_PROGRESS_ON=1
+        echo -e "  ${RED}[Условие 1 ВЫПОЛНЕНО] upload_progress включён — сессию можно подменять.${NC}"
+        UPLOAD_ON=1
     else
-        echo -e "  ${GREEN}[OK] upload_progress отключён (вектор заблокирован на этом бинарнике).${NC}"
+        echo -e "  ${GREEN}[OK] Условие 1 не выполнено — вектор заблокирован на этом бинарнике.${NC}"
     fi
 done
 
 echo -e "\n--- Переопределения upload_progress в пулах FPM и .user.ini ---"
-POOL_HITS=$(grep -rnsE 'php_(admin_)?(value|flag)[[:space:]]*(\[[^]]*\])?[[:space:]]*session\.upload_progress\.enabled[[:space:]]*=' \
-    /etc/php/*/fpm/pool.d/ /opt/php*/etc/php-fpm.d/ 2>/dev/null | grep -E '\.conf:')
-USER_INI_HITS=$(grep -rnsE '^\s*session\.upload_progress\.enabled[[:space:]]*=' /var/www/ 2>/dev/null | grep -E '\.user\.ini:')
+# ВАЖНО: php -i НЕ видит переопределения из pool.d, поэтому их разбираем отдельно.
+POOL_UP=$(grep -rnsE 'php_(admin_)?(value|flag)[[:space:]]*(\[[^]]*\])?[[:space:]]*session\.upload_progress\.enabled[[:space:]]*=' \
+    /etc/php/*/fpm/pool.d/ /opt/*/etc/php-fpm.d/ /opt/fphp/etc/ 2>/dev/null | grep -E '\.conf:')
+INI_UP=$(grep -rnsE '^\s*session\.upload_progress\.enabled[[:space:]]*=' /var/www/ 2>/dev/null | grep -E '\.user\.ini:')
 
 while IFS= read -r LINE; do
     [ -z "$LINE" ] && continue
     VAL=$(printf '%s\n' "$LINE" | sed 's/.*=//' | xargs)
     if is_on "$VAL"; then
-        echo -e "${RED}[ВНИМАНИЕ] Переопределение ВКЛЮЧАЕТ upload_progress: $LINE${NC}"
-        VULN_CONFIG_FOUND=1
-        UPLOAD_PROGRESS_ON=1
+        echo -e "${RED}[Условие 1 ВЫПОЛНЕНО] Переопределение ВКЛЮЧАЕТ upload_progress: $LINE${NC}"
+        UPLOAD_ON=1
     else
         echo -e "${GREEN}[OK] Переопределение отключает upload_progress: $LINE${NC}"
     fi
-done < <(printf '%s\n%s\n' "$POOL_HITS" "$USER_INI_HITS")
+done < <(printf '%s\n%s\n' "$POOL_UP" "$INI_UP")
 
-if [ -z "$POOL_HITS" ] && [ -z "$USER_INI_HITS" ]; then
+if [ -z "$POOL_UP" ] && [ -z "$INI_UP" ]; then
     echo -e "${GREEN}[OK] Переопределений upload_progress в пулах и .user.ini не найдено.${NC}"
 fi
 
-echo -e "\n--- Смена session.serialize_handler в коде (/var/www) ---"
+echo -e "\n--- Смена session.serialize_handler в коде и конфигах ---"
 CODE_MATCHES=$(grep -rnw '/var/www/' -e 'session.serialize_handler' 2>/dev/null | head -n 20)
+POOL_SER=$(grep -rnsE 'php_(admin_)?(value|flag)[[:space:]]*(\[[^]]*\])?[[:space:]]*session\.serialize_handler[[:space:]]*=' \
+    /etc/php/*/fpm/pool.d/ /opt/*/etc/php-fpm.d/ /opt/fphp/etc/ 2>/dev/null | grep -E '\.conf:')
+INI_SER=$(grep -rnsE '^\s*session\.serialize_handler[[:space:]]*=' /var/www/ 2>/dev/null | grep -E '\.user\.ini:')
 
 if [ -n "$CODE_MATCHES" ]; then
-    echo -e "${YELLOW}[INFO] В коде найдено упоминание session.serialize_handler:${NC}"
+    echo -e "${YELLOW}[Условие 2] В коде найдены упоминания session.serialize_handler (ограничение вывода: 20 строк):${NC}"
     echo "$CODE_MATCHES"
-    SERIALIZER_OVERRIDE=1
 else
-    echo -e "${GREEN}[OK] Изменений serialize_handler в коде сайтов не обнаружено.${NC}"
+    echo -e "${GREEN}[OK] В коде сайтов смена serialize_handler не обнаружена.${NC}"
 fi
 
-if [ "$UPLOAD_PROGRESS_ON" -eq 1 ] && [ "$SERIALIZER_OVERRIDE" -eq 1 ]; then
-    echo -e "\n${RED}[ВНИМАНИЕ] upload_progress включён И код трогает serialize_handler — возможен рассинхрон записи/чтения сессии (условие десериализации).${NC}"
-    VULN_CONFIG_FOUND=1
+if [ -n "$POOL_SER" ]; then
+    echo -e "${YELLOW}[Условие 2] serialize_handler переопределён в пулах FPM:${NC}"
+    echo "$POOL_SER"
+fi
+if [ -n "$INI_SER" ]; then
+    echo -e "${YELLOW}[Условие 2] serialize_handler переопределён в .user.ini:${NC}"
+    echo "$INI_SER"
+fi
+
+# Собираем все встреченные значения handler'а (бинарники + явные переопределения)
+for H in $POOL_SER; do
+    V=$(printf '%s\n' "$H" | sed 's/.*=//' | xargs)
+    [ -n "$V" ] && case " $HANDLERS_SEEN " in *" $V "*) : ;; *) HANDLERS_SEEN="$HANDLERS_SEEN $V" ;; esac
+done
+for H in $INI_SER; do
+    V=$(printf '%s\n' "$H" | sed 's/.*=//' | xargs)
+    [ -n "$V" ] && case " $HANDLERS_SEEN " in *" $V "*) : ;; *) HANDLERS_SEEN="$HANDLERS_SEEN $V" ;; esac
+done
+
+set -- $HANDLERS_SEEN
+NUM_HANDLERS=$#
+if [ "$NUM_HANDLERS" -gt 1 ]; then
+    MISMATCH=1
+    echo -e "\n${RED}[Условие 2 ВЫПОЛНЕНО] Найдены РАЗНЫЕ serialize_handler в разных контекстах:${NC}"
+    for H in $HANDLERS_SEEN; do echo "  - $H"; done
+elif [ -n "$CODE_MATCHES" ] || [ -n "$POOL_SER" ] || [ -n "$INI_SER" ]; then
+    # handler явно меняют в коде/конфигах — для сайтов, где это применимо, возможен рассинхрон
+    MISMATCH=1
+    echo -e "\n${YELLOW}[Условие 2] handler меняется явно — возможен рассинхрон записи/чтения, требуется ручная проверка.${NC}"
+else
+    echo -e "\n${GREEN}[OK] Условие 2 не выполнено — serialize_handler един по всем контекстам.${NC}"
 fi
 
 echo -e "\n=================================================="
-if [ "$VULN_CONFIG_FOUND" -eq 1 ]; then
-    echo -e "ИТОГ: ${RED}ТРЕБУЕТСЯ ВНИМАНИЕ — upload_progress активен хотя бы в одном контексте${NC}"
-    echo "Рекомендация: session.upload_progress.enabled = Off в php.ini всех версий, во всех пулах FPM и в .user.ini;"
-    echo "serialize_handler должен быть одинаков на записи и на чтении."
-    exit 1
+if [ "$UPLOAD_ON" -eq 1 ] && [ "$MISMATCH" -eq 1 ]; then
+    echo -e "ИТОГ: ${RED}КРИТИЧЕСКИЙ РИСК — выполнены ОБА условия (upload_progress + рассинхрон handler'ов)${NC}"
+    EXIT_CODE=2
+elif [ "$UPLOAD_ON" -eq 1 ]; then
+    echo -e "ИТОГ: ${YELLOW}ПРЕДУПРЕЖДЕНИЕ — upload_progress включён (подмена сессии возможна), рассинхрон handler'ов не найден${NC}"
+    EXIT_CODE=1
+elif [ "$WARNING_UNREADABLE" -eq 1 ]; then
+    echo -e "ИТОГ: ${YELLOW}ТРЕБУЕТСЯ РУЧНАЯ ПРОВЕРКА — часть настроек прочитать не удалось${NC}"
+    EXIT_CODE=1
 else
     echo -e "ИТОГ: ${GREEN}СЕРВЕР ЗАЩИЩЁН ОТ ЭТОГО ВЕКТОРА АТАКИ${NC}"
-    exit 0
+    EXIT_CODE=0
 fi
+echo "=================================================="
+exit $EXIT_CODE
