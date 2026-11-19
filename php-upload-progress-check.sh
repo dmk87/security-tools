@@ -8,6 +8,8 @@
 #   (бинарники, пулы, .user.ini, код сайтов) — открывает путь к десериализации.
 #   Важно: handler "php_serialize" сам по себе НЕ уязвим; опасно именно расхождение
 #   записи и чтения (например, запись php_serialize + чтение php).
+#   Упоминания handler'а в тестовых директориях vendor (Tests) игнорируются,
+#   а код, выставляющий тот же handler, что и глобально, шум не поднимает.
 #
 # Коды выхода: 0 — защищено; 1 — предупреждение; 2 — критический риск; 3 — PHP не найден.
 
@@ -101,7 +103,7 @@ if [ -z "$POOL_UP" ] && [ -z "$INI_UP" ]; then
 fi
 
 echo -e "\n--- Смена session.serialize_handler в коде и конфигах ---"
-CODE_MATCHES=$(grep -rnw '/var/www/' -e 'session.serialize_handler' 2>/dev/null | head -n 20)
+CODE_MATCHES=$(grep -rnw '/var/www/' -e 'session.serialize_handler' --exclude-dir={Tests,tests,Test,test} 2>/dev/null | head -n 20)
 POOL_SER=$(grep -rnsE 'php_(admin_)?(value|flag)[[:space:]]*(\[[^]]*\])?[[:space:]]*session\.serialize_handler[[:space:]]*=' \
     /etc/php/*/fpm/pool.d/ /opt/*/etc/php-fpm.d/ /opt/fphp/etc/ 2>/dev/null | grep -E '\.conf:')
 INI_SER=$(grep -rnsE '^\s*session\.serialize_handler[[:space:]]*=' /var/www/ 2>/dev/null | grep -E '\.user\.ini:')
@@ -134,16 +136,29 @@ done
 
 set -- $HANDLERS_SEEN
 NUM_HANDLERS=$#
-if [ "$NUM_HANDLERS" -gt 1 ]; then
+
+# Код трогает handler? Сравниваем выставляемые значения с глобальными:
+# код, ставящий тот же handler, что и везде (например, тестовые фикстуры фреймворков), шумить не будет.
+CODE_NEW_VALUE=""
+if [ -n "$CODE_MATCHES" ]; then
+    for V in $(printf '%s\n' "$CODE_MATCHES" | sed 's/^[^:]*:[0-9]*://' | grep -oE "\b(php|php_serialize|php_binary|wddx)\b" | sort -u); do
+        case " $HANDLERS_SEEN " in
+            *" $V "*) : ;;
+            *) CODE_NEW_VALUE="$V" ;;
+        esac
+    done
+fi
+
+if [ "$NUM_HANDLERS" -gt 1 ] || [ -n "$CODE_NEW_VALUE" ]; then
     MISMATCH=1
-    echo -e "\n${RED}[Условие 2 ВЫПОЛНЕНО] Найдены РАЗНЫЕ serialize_handler в разных контекстах:${NC}"
+    echo -e "\n${RED}[Условие 2 ВЫПОЛНЕНО] Найдены разные serialize_handler в разных контекстах:${NC}"
     for H in $HANDLERS_SEEN; do echo "  - $H"; done
-elif [ -n "$CODE_MATCHES" ] || [ -n "$POOL_SER" ] || [ -n "$INI_SER" ]; then
-    # handler явно меняют в коде/конфигах — для сайтов, где это применимо, возможен рассинхрон
-    MISMATCH=1
-    echo -e "\n${YELLOW}[Условие 2] handler меняется явно — возможен рассинхрон записи/чтения, требуется ручная проверка.${NC}"
+    [ -n "$CODE_NEW_VALUE" ] && echo -e "  Код выставляет: ${RED}$CODE_NEW_VALUE${NC}"
 else
     echo -e "\n${GREEN}[OK] Условие 2 не выполнено — serialize_handler един по всем контекстам.${NC}"
+    if [ -n "$POOL_SER" ] || [ -n "$INI_SER" ]; then
+        echo -e "${YELLOW}[INFO] Переопределения handler'а есть, но значение совпадает с глобальным.${NC}"
+    fi
 fi
 
 echo -e "\n=================================================="
