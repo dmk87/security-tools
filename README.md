@@ -157,7 +157,7 @@ chmod +x php-upload-progress-check.sh
 1. **Собирает все бинарники php-fpm** — системные из `/usr/sbin`, `/usr/local/sbin` и сборки FASTPANEL из `/opt`.
 2. **Читает настройки каждой версии** — `session.upload_progress.enabled` и `session.serialize_handler` через phpinfo.
 3. **Разбирает переопределения в пулах FPM и `.user.ini`** — они не видны через `php -i`, поэтому без этого шага вердикт может быть ложным «защищено».
-4. **Сверяет `serialize_handler` между всеми контекстами** (бинарники, пулы, `.user.ini`, код сайтов) — разные значения или смена handler'а в коде — усиливающее условие: именно рассинхрон записи/чтения открывает путь к десериализации.
+4. **Сверяет `serialize_handler` между всеми контекстами** (бинарники, пулы, `.user.ini`, код сайтов) — разные значения или смена handler'а в коде — усиливающее условие: именно рассинхрон записи/чтения открывает путь к десериализации. Тестовые директории vendor (`Tests`) исключены, а код, выставляющий тот же handler, что и глобально, шум не поднимает.
 
 ### 🚦 Возможные вердикты
 
@@ -173,7 +173,7 @@ chmod +x php-upload-progress-check.sh
 
 ```bash
 for BIN in $(find /usr/sbin /opt -maxdepth 3 -name 'php-fpm*' -type f -executable 2>/dev/null); do
-  INI=$($BIN -i 2>/dev/null | awk -F': ' '/^Loaded Configuration File/{print $2}')
+  INI=$($BIN -i 2>/dev/null | awk -F' => ' '/^Loaded Configuration File/{print $2}')
   [ -n "$INI" ] && sudo sed -i 's/^;\?[[:space:]]*session\.upload_progress\.enabled.*/session.upload_progress.enabled = Off/' "$INI"
 done
 systemctl list-units --type=service --all | grep -Ei "fphp|php.*fpm" | awk '{print $1}' | xargs -r sudo systemctl restart
