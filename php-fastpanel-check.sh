@@ -70,7 +70,7 @@ check_php_status() {
         PKG_NAME=""
     fi
 
-    # 2. Пакеты FASTPANEL (/opt/php*, /opt/fphp): проверяем ДО dpkg-веток,
+    # 1. Пакеты FASTPANEL (/opt/php*, /opt/fphp): проверяем ДО dpkg-веток,
     # иначе версии пакетов FASTPANEL вида 1.6-ubuntu24.04p10 ложатся в USN-логику
     if [[ "$BIN" == /opt/php* ]] || [[ "$BIN" == /opt/fphp* ]] || [[ "$PKG_NAME" == *fastpanel* ]]; then
         local CLEAN_VER=$(echo "$RAW_VER" | cut -d'-' -f1)
@@ -100,7 +100,7 @@ check_php_status() {
         return
     fi
 
-    # 1. Проверка для штатных пакетов Ubuntu (USN-8948-1 закрывает PHP2Shell)
+    # 2. Проверка для штатных пакетов Ubuntu (USN-8948-1 закрывает PHP2Shell)
     if [[ "$PKG_VER" == *"ubuntu"* ]]; then
         local USN_OK=0
         if [[ "$PKG_VER" == 8.1.* ]] && ver_ge "$PKG_VER" "8.1.2-1ubuntu2.28"; then USN_OK=1; fi
@@ -120,7 +120,7 @@ check_php_status() {
         return
     fi
 
-    # 1b. Штатные пакеты Debian: номер версии может не отражать апстрим-патч (бэкпорт фикса без смены X.Y.Z)
+    # 2b. Штатные пакеты Debian: номер версии может не отражать апстрим-патч (бэкпорт фикса без смены X.Y.Z)
     if [[ "$PKG_VER" == *deb* ]]; then
         echo -e "  [ПАКЕТ DEBIAN] $BIN ($PKG_NAME: $PKG_VER)"
         echo "     -> Debian бэкпортит фиксы без смены апстрим-версии. Сверьте статус вручную с DSA (debian.org/security)."
@@ -149,7 +149,7 @@ check_php_status() {
 # 3. Аудит версий PHP, процессов PHP-FPM и условий эксплуатации уязвимостей (19.11.2026)
 echo -e "\n Аудит версий PHP и условий уязвимостей (PHP2Shell / PHPAfterShell / CVE-2026-129289):"
 
-PHP_BINS=$(find /usr/bin /usr/local/bin /usr/local/sbin /usr/sbin /opt/php* /opt/fphp -maxdepth 3 -type f \( -name "php" -o -name "php-fpm" -o -name "php-fpm[0-9]*" \) 2>/dev/null | sort -u)
+PHP_BINS=$(find /usr/bin /usr/local/bin /usr/local/sbin /usr/sbin /opt/php* /opt/fphp -maxdepth 3 -type f -executable \( -name "php" -o -name "php[0-9.]*" -o -name "php-fpm*" -o -name "php*-fpm*" \) 2>/dev/null | xargs -r readlink -f | sort -u)
 
 if [ -z "$PHP_BINS" ]; then
     echo "  - Исполняемые файлы PHP на хосте не найдены."
@@ -158,8 +158,7 @@ else
         check_php_status "$BIN"
 
         # Параметры сессий и upload_progress критичны только для веб-SAPI (php-fpm), не для CLI.
-        # -x отсекает не-исполняемые файлы (конфиги, логи) — find больше не должен их отдавать
-        if [[ "$BIN" == */php-fpm* ]] && [ -x "$BIN" ]; then
+        if [[ "$BIN" == *fpm* ]] && [ -x "$BIN" ]; then
             INI_FILE=$("$BIN" -i 2>/dev/null | grep -oE '/[^ "<]+php\.ini' | head -n 1)
 
             if [ -n "$INI_FILE" ] && [ -f "$INI_FILE" ]; then
@@ -255,9 +254,9 @@ if [ -n "$FP_INIS" ]; then
     echo -e "\n  Аудит индивидуальных конфигов сайтов и пулов FASTPANEL:"
     FP_ISSUES=0
     for INI_PATH in $FP_INIS; do
-        FP_UP=$(grep -E "^[[:space:]]*(session\.upload_progress\.enabled|php_admin_flag\[session\.upload_progress\.enabled\])[[:space:]]*=" "$INI_PATH" | tail -n 1 | cut -d'=' -f2- | cut -d';' -f1 | tr -d ' "')
-        FP_SAVE=$(grep -E "^[[:space:]]*(session\.save_handler|php_admin_value\[session\.save_handler\])[[:space:]]*=" "$INI_PATH" | tail -n 1 | cut -d'=' -f2- | cut -d';' -f1 | tr -d ' "')
-        FP_SER=$(grep -E "^[[:space:]]*(session\.serialize_handler|php_admin_value\[session\.serialize_handler\])[[:space:]]*=" "$INI_PATH" | tail -n 1 | cut -d'=' -f2- | cut -d';' -f1 | tr -d ' "')
+        FP_UP=$(grep -E "^[[:space:]]*(session\.upload_progress\.enabled|php_(admin_)?(flag|value)\[session\.upload_progress\.enabled\])[[:space:]]*=" "$INI_PATH" | tail -n 1 | cut -d'=' -f2- | cut -d';' -f1 | tr -d ' "')
+        FP_SAVE=$(grep -E "^[[:space:]]*(session\.save_handler|php_(admin_)?value\[session\.save_handler\])[[:space:]]*=" "$INI_PATH" | tail -n 1 | cut -d'=' -f2- | cut -d';' -f1 | tr -d ' "')
+        FP_SER=$(grep -E "^[[:space:]]*(session\.serialize_handler|php_(admin_)?value\[session\.serialize_handler\])[[:space:]]*=" "$INI_PATH" | tail -n 1 | cut -d'=' -f2- | cut -d';' -f1 | tr -d ' "')
 
         if [ "$FP_UP" = "1" ] || [ "${FP_UP,,}" = "on" ]; then
             echo "     [САЙТ/ПУЛ CVE-2026-115560/126714] Включен upload_progress=On в $INI_PATH"
