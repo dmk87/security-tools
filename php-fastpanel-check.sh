@@ -90,8 +90,8 @@ check_php_status() {
     fi
 }
 
-# 3. Аудит версий PHP, процессов PHP-FPM и защитных настроек
-echo -e "\n Аудит версий PHP и процессов PHP-FPM:"
+# 3. Аудит версий PHP, процессов PHP-FPM и условий эксплуатации уязвимостей (19.11.2026)
+echo -e "\n Аудит версий PHP и условий уязвимостей (PHP2Shell / PHPAfterShell / CVE-2026-129289):"
 
 PHP_BINS=$(find /usr/bin /usr/local/bin /usr/local/sbin /usr/sbin /opt/php* -maxdepth 3 -type f \( -name "php" -o -name "php-fpm*" \) 2>/dev/null | sort -u)
 
@@ -100,53 +100,58 @@ if [ -z "$PHP_BINS" ]; then
 else
     for BIN in $PHP_BINS; do
         check_php_status "$BIN"
+        
+        # Проверяем параметры конфигурации только для CLI-бинарников (чтобы не дублировать на php-fpm)
         if [[ "$BIN" == */php ]]; then
             UP_PROG=$("$BIN" -r 'echo ini_get("session.upload_progress.enabled");' 2>/dev/null)
+            SAVE_HANDLER=$("$BIN" -r 'echo ini_get("session.save_handler");' 2>/dev/null)
+            SER_HANDLER=$("$BIN" -r 'echo ini_get("session.serialize_handler");' 2>/dev/null)
+            LOG_ERRORS=$("$BIN" -r 'echo ini_get("log_errors");' 2>/dev/null)
+            ERROR_LOG=$("$BIN" -r 'echo ini_get("error_log");' 2>/dev/null)
+
+            # Условие 1: session.upload_progress.enabled (CVE-2026-115560 и вектор CVE-2026-126714)
             if [ "$UP_PROG" = "1" ] || [ "${UP_PROG,,}" = "on" ]; then
-                echo "     [МИТИГАЦИЯ] Включен session.upload_progress.enabled=On -> задайте =0 в php.ini для защиты от CVE-2026-115560/126714 до выхода патча."
+                echo "     [УСЛОВИЕ CVE-2026-115560/126714] Включен session.upload_progress.enabled=On -> задайте =0 в php.ini до установки патча."
+            fi
+
+            # Условие 2: Файловые сессии (обязательное условие для PHPAfterShell / CVE-2026-126714)
+            if [ "$SAVE_HANDLER" = "files" ]; then
+                echo "     [УСЛОВИЕ PHPAfterShell / CVE-2026-126714] session.save_handler=files -> уязвим к перезаписи файлов сессий (Redis/Memcached не затронуты)."
+            fi
+
+            # Условие 3: Нестандартный сериализатор (CVE-2026-115560)
+            if [ -n "$SER_HANDLER" ] && [ "$SER_HANDLER" != "php" ]; then
+                echo "     [УСЛОВИЕ CVE-2026-115560] Нестандартный session.serialize_handler='$SER_HANDLER' -> повышенный риск несоответствия форматов сессий."
+            fi
+
+            # Условие 4: Логирование в файл (CVE-2026-129496 - UAF в timezone cache)
+            if { [ "$LOG_ERRORS" = "1" ] || [ "${LOG_ERRORS,,}" = "on" ]; } && [ -n "$ERROR_LOG" ] && [ "$ERROR_LOG" != "syslog" ]; then
+                echo "     [УСЛОВИЕ CVE-2026-129496] Включено файловое логирование (error_log=$ERROR_LOG) -> риск UAF в timezone cache (временная защита: error_log=syslog)."
             fi
         fi
     done
 fi
 
-# Проверка Nginx на fastcgi_keep_conn (вектор CVE-2026-129289)
+# Проверка веб-серверов на удержание соединений с PHP-FPM (вектор CVE-2026-129289 Request Smuggling)
 if [ -d /etc/nginx ]; then
     KEEP_CONN=$(grep -rn "fastcgi_keep_conn[[:space:]]\+on" /etc/nginx/ 2>/dev/null)
     if [ -n "$KEEP_CONN" ]; then
-        echo -e "\n  [МИТИГАЦИЯ CVE-2026-129289] В Nginx найдено 'fastcgi_keep_conn on':"
+        echo -e "\n  [УСЛОВИЕ CVE-2026-129289] В Nginx найдено 'fastcgi_keep_conn on':"
         echo "$KEEP_CONN" | sed 's/^/     /'
-        echo "     -> Если бэкпорт от 19.11.2026 ещё не установлен, отключите fastcgi_keep_conn (или задайте off)."
+        echo "     -> Отключите fastcgi_keep_conn (задайте off), если патч от 19.11.2026 ещё не установлен."
     fi
 fi
 
-# Сверка дат обновления пакетов и старта PHP-FPM (только на хосте, без Docker)
-LATEST_PHP_PKG=$(ls -t /var/lib/dpkg/info/*php*.list 2>/dev/null | head -n 1)
-PKG_EPOCH=0
-if [ -n "$LATEST_PHP_PKG" ]; then
-    PKG_EPOCH=$(stat -c %Y "$LATEST_PHP_PKG")
-    PKG_DATE=$(date -d "@$PKG_EPOCH" "+%Y-%m-%d %H:%M:%S")
-    echo -e "\n  Последнее обновление dpkg-пакетов PHP: $PKG_DATE ($(basename "$LATEST_PHP_PKG" .list))"
-fi
-
-PIDS=$(pgrep -f "php-fpm: master process")
-if [ -n "$PIDS" ]; then
-    for PID in $PIDS; do
-        if grep -qaE "docker|containerd|kubepods|lxc" "/proc/$PID/cgroup" 2>/dev/null; then
-            continue
+for APACHE_DIR in /etc/apache2 /etc/httpd; do
+    if [ -d "$APACHE_DIR" ]; then
+        APACHE_REUSE=$(grep -rni "enablereuse=on" "$APACHE_DIR" 2>/dev/null)
+        if [ -n "$APACHE_REUSE" ]; then
+            echo -e "\n  [УСЛОВИЕ CVE-2026-129289] В Apache найдено 'enablereuse=on':"
+            echo "$APACHE_REUSE" | sed 's/^/     /'
+            echo "     -> Отключите enablereuse (задайте enablereuse=off) для защиты от FastCGI Request Smuggling."
         fi
-        PROC_EPOCH=$(stat -c %Y "/proc/$PID" 2>/dev/null)
-        PROC_DATE=$(date -d "@$PROC_EPOCH" "+%Y-%m-%d %H:%M:%S")
-        PROC_CMD=$(tr '\0' ' ' < "/proc/$PID/cmdline" | xargs)
-        
-        if [ "$PKG_EPOCH" -gt "$PROC_EPOCH" ]; then
-            echo -e "  [ОПАСНО - НУЖЕН РЕСТАРТ] PHP-FPM (PID $PID) запущен $PROC_DATE (ДО обновления пакетов!)"
-            echo "     Команда: $PROC_CMD"
-        else
-            echo -e "  [ОК] PHP-FPM (PID $PID) запущен: $PROC_DATE"
-            echo "     Команда: $PROC_CMD"
-        fi
-    done
-fi
+    fi
+done
 
 # 4. Проверка доступных обновлений безопасности ОС
 echo -e "\n Ожидающие обновления безопасности ОС:"
