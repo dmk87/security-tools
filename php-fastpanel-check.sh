@@ -155,6 +155,37 @@ else
 
     done
 fi
+# Проверка индивидуальных конфигов php.ini и пулов сайтов FASTPANEL
+FP_INIS=$(find /var/www/*/data/php-bin* /etc/php/*/fpm/pool.d /opt/php*/etc/php-fpm.d -maxdepth 2 -type f \( -name "php.ini" -o -name "*.conf" \) 2>/dev/null | sort -u)
+
+if [ -n "$FP_INIS" ]; then
+    echo -e "\n  Аудит индивидуальных конфигов сайтов и пулов FASTPANEL:"
+    FP_ISSUES=0
+    for INI_PATH in $FP_INIS; do
+        # Читаем значения с отсечением комментариев ';' и пробелов
+        FP_UP=$(grep -E "^[[:space:]]*(session\.upload_progress\.enabled|php_admin_flag\[session\.upload_progress\.enabled\])[[:space:]]*=" "$INI_PATH" | tail -n 1 | cut -d'=' -f2- | cut -d';' -f1 | tr -d ' "')
+        FP_SAVE=$(grep -E "^[[:space:]]*(session\.save_handler|php_admin_value\[session\.save_handler\])[[:space:]]*=" "$INI_PATH" | tail -n 1 | cut -d'=' -f2- | cut -d';' -f1 | tr -d ' "')
+        FP_SER=$(grep -E "^[[:space:]]*(session\.serialize_handler|php_admin_value\[session\.serialize_handler\])[[:space:]]*=" "$INI_PATH" | tail -n 1 | cut -d'=' -f2- | cut -d';' -f1 | tr -d ' "')
+
+        if [ "$FP_UP" = "1" ] || [ "${FP_UP,,}" = "on" ]; then
+            echo "     [САЙТ/ПУЛ CVE-2026-115560/126714] Включен upload_progress=On в $INI_PATH"
+            FP_ISSUES=1
+        fi
+        if [ "$FP_SAVE" = "files" ]; then
+            echo "     [САЙТ/ПУЛ PHPAfterShell] Задан save_handler=files в $INI_PATH"
+            FP_ISSUES=1
+        fi
+        if [ -n "$FP_SER" ] && [ "$FP_SER" != "php" ]; then
+            echo "     [САЙТ/ПУЛ CVE-2026-115560] Нестандартный serialize_handler='$FP_SER' в $INI_PATH"
+            FP_ISSUES=1
+        fi
+    done
+
+    if [ "$FP_ISSUES" -eq 0 ]; then
+        echo "     - Переопределений уязвимых параметров в конфигах сайтов/пулов не найдено."
+    fi
+fi
+
 
 # Проверка веб-серверов на удержание соединений с PHP-FPM (вектор CVE-2026-129289 Request Smuggling)
 if [ -d /etc/nginx ]; then
