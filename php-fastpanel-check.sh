@@ -101,34 +101,36 @@ else
     for BIN in $PHP_BINS; do
         check_php_status "$BIN"
         
-        # Проверяем параметры конфигурации только для CLI-бинарников (чтобы не дублировать на php-fpm)
-        if [[ "$BIN" == */php ]]; then
-            UP_PROG=$("$BIN" -r 'echo ini_get("session.upload_progress.enabled");' 2>/dev/null)
-            SAVE_HANDLER=$("$BIN" -r 'echo ini_get("session.save_handler");' 2>/dev/null)
-            SER_HANDLER=$("$BIN" -r 'echo ini_get("session.serialize_handler");' 2>/dev/null)
-            LOG_ERRORS=$("$BIN" -r 'echo ini_get("log_errors");' 2>/dev/null)
-            ERROR_LOG=$("$BIN" -r 'echo ini_get("error_log");' 2>/dev/null)
+                # Проверяем параметры конфигурации для любого бинарника (и php, и php-fpm)
+        if [[ "$BIN" == */php ]] || [[ "$BIN" == */php-fpm* ]]; then
+            INI_DUMP=$("$BIN" -i 2>/dev/null)
+            UP_PROG=$(echo "$INI_DUMP" | awk -F' => ' '/^session\.upload_progress\.enabled/ {print $2; exit}')
+            SAVE_HANDLER=$(echo "$INI_DUMP" | awk -F' => ' '/^session\.save_handler/ {print $2; exit}')
+            SER_HANDLER=$(echo "$INI_DUMP" | awk -F' => ' '/^session\.serialize_handler/ {print $2; exit}')
+            LOG_ERRORS=$(echo "$INI_DUMP" | awk -F' => ' '/^log_errors/ {print $2; exit}')
+            ERROR_LOG=$(echo "$INI_DUMP" | awk -F' => ' '/^error_log/ {print $2; exit}')
 
             # Условие 1: session.upload_progress.enabled (CVE-2026-115560 и вектор CVE-2026-126714)
             if [ "$UP_PROG" = "1" ] || [ "${UP_PROG,,}" = "on" ]; then
-                echo "     [УСЛОВИЕ CVE-2026-115560/126714] Включен session.upload_progress.enabled=On -> задайте =0 в php.ini до установки патча."
+                echo "     [УСЛОВИЕ CVE-2026-115560/126714] Включен session.upload_progress.enabled=On -> задайте =0."
             fi
 
             # Условие 2: Файловые сессии (обязательное условие для PHPAfterShell / CVE-2026-126714)
             if [ "$SAVE_HANDLER" = "files" ]; then
-                echo "     [УСЛОВИЕ PHPAfterShell / CVE-2026-126714] session.save_handler=files -> уязвим к перезаписи файлов сессий (Redis/Memcached не затронуты)."
+                echo "     [УСЛОВИЕ PHPAfterShell / CVE-2026-126714] session.save_handler=files -> риск перезаписи сессий (Redis/Memcached не затронуты)."
             fi
 
             # Условие 3: Нестандартный сериализатор (CVE-2026-115560)
             if [ -n "$SER_HANDLER" ] && [ "$SER_HANDLER" != "php" ]; then
-                echo "     [УСЛОВИЕ CVE-2026-115560] Нестандартный session.serialize_handler='$SER_HANDLER' -> повышенный риск несоответствия форматов сессий."
+                echo "     [УСЛОВИЕ CVE-2026-115560] Нестандартный session.serialize_handler='$SER_HANDLER'."
             fi
 
             # Условие 4: Логирование в файл (CVE-2026-129496 - UAF в timezone cache)
-            if { [ "$LOG_ERRORS" = "1" ] || [ "${LOG_ERRORS,,}" = "on" ]; } && [ -n "$ERROR_LOG" ] && [ "$ERROR_LOG" != "syslog" ]; then
-                echo "     [УСЛОВИЕ CVE-2026-129496] Включено файловое логирование (error_log=$ERROR_LOG) -> риск UAF в timezone cache (временная защита: error_log=syslog)."
+            if { [ "$LOG_ERRORS" = "1" ] || [ "${LOG_ERRORS,,}" = "on" ]; } && [ -n "$ERROR_LOG" ] && [ "$ERROR_LOG" != "no value" ] && [ "$ERROR_LOG" != "syslog" ]; then
+                echo "     [УСЛОВИЕ CVE-2026-129496] Включено файловое логирование (error_log=$ERROR_LOG) -> риск UAF в timezone cache."
             fi
         fi
+
     done
 fi
 
