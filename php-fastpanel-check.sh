@@ -70,6 +70,36 @@ check_php_status() {
         PKG_NAME=""
     fi
 
+    # 2. Пакеты FASTPANEL (/opt/php*, /opt/fphp): проверяем ДО dpkg-веток,
+    # иначе версии пакетов FASTPANEL вида 1.6-ubuntu24.04p10 ложатся в USN-логику
+    if [[ "$BIN" == /opt/php* ]] || [[ "$BIN" == /opt/fphp* ]] || [[ "$PKG_NAME" == *fastpanel* ]]; then
+        local CLEAN_VER=$(echo "$RAW_VER" | cut -d'-' -f1)
+        local NOV_OK=0 OCT_OK=0
+        read -r NOV_OK OCT_OK <<< "$(eval_series "$CLEAN_VER")"
+
+        if [ "$NOV_OK" -eq 1 ]; then
+            echo -e "  [ОК - ПОЛНОСТЬЮ ЗАЩИЩЕН] $BIN -> Версия $RAW_VER ($PKG_NAME: $PKG_VER)"
+        elif [ "$OCT_OK" -eq 1 ]; then
+            echo -e "  [ВНИМАНИЕ - ТОЛЬКО PHP2SHELL] $BIN -> Версия $RAW_VER ($PKG_NAME: $PKG_VER)"
+            if [[ "$CLEAN_VER" == 7.4.* ]]; then
+                echo "     -> Октябрьский патч есть (7.4.33+); статус ноябрьских патчей (19.11.2026) для ветки 7.4 неизвестен - следите за релизом FASTPANEL."
+            else
+                echo "     -> Октябрьский патч (24.10.2026) есть, ноябрьские (19.11.2026) по номеру версии не подтверждены."
+                echo "     -> Если релиз FASTPANEL содержит бэкпорт фиксов без смены версии - сверьте changelog; иначе обновите до 8.2.36/8.3.37/8.4.28/8.5.13."
+            fi
+            WARN_HITS=$((WARN_HITS+1))
+        else
+            echo -e "  [КРИТИЧНО - УЯЗВИМ К PHP2SHELL] $BIN -> Версия $RAW_VER ($PKG_NAME: $PKG_VER)!"
+            if [[ "$CLEAN_VER" == 7.4.* ]]; then
+                echo "     -> Обновите PHP через FASTPANEL до 7.4.33 или новее."
+            else
+                echo "     -> Обновите PHP через FASTPANEL (цель: 8.2.36 / 8.3.37 / 8.4.28 / 8.5.13)."
+            fi
+            CRIT_HITS=$((CRIT_HITS+1))
+        fi
+        return
+    fi
+
     # 1. Проверка для штатных пакетов Ubuntu (USN-8948-1 закрывает PHP2Shell)
     if [[ "$PKG_VER" == *"ubuntu"* ]]; then
         local USN_OK=0
@@ -98,27 +128,6 @@ check_php_status() {
         return
     fi
 
-    # 2. Пакеты FASTPANEL (/opt/php*, /opt/fphp): апстрим-версии, проверяем теми же порогами
-    if [[ "$BIN" == /opt/php* ]] || [[ "$BIN" == /opt/fphp* ]] || [[ "$PKG_NAME" == *fastpanel* ]]; then
-        local CLEAN_VER=$(echo "$RAW_VER" | cut -d'-' -f1)
-        local NOV_OK=0 OCT_OK=0
-        read -r NOV_OK OCT_OK <<< "$(eval_series "$CLEAN_VER")"
-
-        if [ "$NOV_OK" -eq 1 ]; then
-            echo -e "  [ОК - ПОЛНОСТЬЮ ЗАЩИЩЕН] $BIN -> Версия $RAW_VER (закрыты PHP2Shell и патчи 19.11.2026)"
-        elif [ "$OCT_OK" -eq 1 ]; then
-            echo -e "  [ВНИМАНИЕ - ТОЛЬКО PHP2SHELL] $BIN -> Версия $RAW_VER"
-            echo "     -> Октябрьский патч (24.10.2026) есть, ноябрьские (19.11.2026) по номеру версии не подтверждены."
-            echo "     -> Если релиз FASTPANEL содержит бэкпорт фиксов без смены версии - сверьте changelog; иначе обновите до 8.2.36/8.3.37/8.4.28/8.5.13."
-            WARN_HITS=$((WARN_HITS+1))
-        else
-            echo -e "  [КРИТИЧНО - УЯЗВИМ К PHP2SHELL] $BIN -> Версия $RAW_VER!"
-            echo "     -> Обновите PHP через FASTPANEL (цель: 8.2.36 / 8.3.37 / 8.4.28 / 8.5.13 / 7.4.33)."
-            CRIT_HITS=$((CRIT_HITS+1))
-        fi
-        return
-    fi
-
     # 3. Проверка сборок из исходников (/usr/local) и репозитория ondrej/php (sury)
     local CLEAN_VER=$(echo "$RAW_VER" | cut -d'-' -f1)
     local NOV_OK=0 OCT_OK=0
@@ -140,7 +149,7 @@ check_php_status() {
 # 3. Аудит версий PHP, процессов PHP-FPM и условий эксплуатации уязвимостей (19.11.2026)
 echo -e "\n Аудит версий PHP и условий уязвимостей (PHP2Shell / PHPAfterShell / CVE-2026-129289):"
 
-PHP_BINS=$(find /usr/bin /usr/local/bin /usr/local/sbin /usr/sbin /opt/php* /opt/fphp -maxdepth 3 -type f \( -name "php" -o -name "php-fpm*" \) 2>/dev/null | sort -u)
+PHP_BINS=$(find /usr/bin /usr/local/bin /usr/local/sbin /usr/sbin /opt/php* /opt/fphp -maxdepth 3 -type f \( -name "php" -o -name "php-fpm" -o -name "php-fpm[0-9]*" \) 2>/dev/null | sort -u)
 
 if [ -z "$PHP_BINS" ]; then
     echo "  - Исполняемые файлы PHP на хосте не найдены."
@@ -148,8 +157,9 @@ else
     for BIN in $PHP_BINS; do
         check_php_status "$BIN"
 
-        # Параметры сессий и upload_progress критичны только для веб-SAPI (php-fpm / mod_php / cgi), не для CLI
-        if [[ "$BIN" == */php-fpm* ]]; then
+        # Параметры сессий и upload_progress критичны только для веб-SAPI (php-fpm), не для CLI.
+        # -x отсекает не-исполняемые файлы (конфиги, логи) — find больше не должен их отдавать
+        if [[ "$BIN" == */php-fpm* ]] && [ -x "$BIN" ]; then
             INI_FILE=$("$BIN" -i 2>/dev/null | grep -oE '/[^ "<]+php\.ini' | head -n 1)
 
             if [ -n "$INI_FILE" ] && [ -f "$INI_FILE" ]; then
